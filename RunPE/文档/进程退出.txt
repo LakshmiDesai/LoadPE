@@ -1,0 +1,38 @@
+问题：
+当在内存中运行的程序，比如arp.EXE执行完之后就会退出，那结果是ExitProcess被调用，那将是我们主进程也结束，显然我们不希望这样。
+
+处理办法：HOOK ExitProcess。问题来了
+
+
+对MS的许多控制台程序，它们退出都是调用exit
+ #   Memory  ChildEBP RetAddr  Args to Child              
+00           003ef554 7c92df5a 7c939b23 000007f4 00000000 ntdll!KiFastSystemCallRet (FPO: [0,0,0])
+01         4 003ef558 7c939b23 000007f4 00000000 00000000 ntdll!NtWaitForSingleObject+0xc (FPO: [3,0,0])
+02        88 003ef5e0 7c921046 00c31ae8 77c0a5eb 77c31ae8 ntdll!RtlpWaitForCriticalSection+0x132 (FPO: [Non-Fpo])
+03         8 003ef5e8 77c0a5eb 77c31ae8 7c8099cf 003ef608 ntdll!RtlEnterCriticalSection+0x46 (FPO: [1,0,0])
+04        10 003ef5f8 77c09de8 00000008 7c8099cf 003ef61c msvcrt!_lock+0x30 (FPO: [Non-Fpo])
+05        10 003ef608 77c09e90 00000000 00000000 00000000 msvcrt!_cinit+0x5e (FPO: [Non-Fpo])
+06        14 003ef61c 01002735 00000000 00000000 003efbc4 msvcrt!exit+0x12 (FPO: [Non-Fpo])
+
+
+里面持有了一个锁，所以如果HOOK ExitProcess， 那我们俩次在内存中运行arp.EXE之后就会死锁。所以对这类程序而言，不能HOOK ExitProcess，只能HOOK msvcrt!exit
+
+
+另外还需要一个技巧，在内存运行的程序由我们EXE的一个线程来完成，否则HOOK msvcrt!exit也没办法处理好逻辑
+
+void Fakeexit( 
+		  int status 
+		  )
+{
+
+	if( status == 0xbeebee )
+		Oldexit(status);
+
+	ExitThread(0xbeebee);
+}
+
+
+
+因为是创建的线程，所以只需要替换成ExitThread(0xbeebee);之后，进程退出这动作就被捕获了，然后我们替exit代为ExitThread(0xbeebee)后线程就退出返回控制到我们主EXE模块而不会出错。
+
+另外创建线程时要自己注意堆栈问题，否则堆栈可能会占用我们要放EXE的地址空间，导致失败，所以必须先分配内存空间后才能创建线程。

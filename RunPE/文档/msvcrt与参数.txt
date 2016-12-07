@@ -1,0 +1,4 @@
+WIN 7 ARP.EXE.text:0100239E                 push    dword_1005968.text:010023A4                 push    dword_1005960.text:010023AA                 call    _mainmsvcrt.dll 第一次被加载的时候，会调用GetCommandLine来获取当前参数，然后进行处理填充msvcrt的内部变量	
+msvcrt!__argc 和 msvcrt!__argv。之后通过__getmainargs, __wgetmainargs就可以获取到相应参数，这时候并不会再走GetCommandLine。WIN 7的ARP.EXE获取命令行参数就是通过__getmainargs。因为msvcrt.dll在进程运行的时候已经被加载，所以无法拦截到GetCommandLine
+俩个参数在LOAD msvcrt.dll时被初始化。。WIN 7每个进程一运行就会加载这个DLL.所以需要自己HOOK 
+__getmainargs, __wgetmainargs

@@ -1,0 +1,42 @@
+MS控制台的输出不是用printf，而是fprintf
+
+.text:0100215B loc_100215B:                            ; CODE XREF: _PutMsg+5Ej
+.text:0100215B                 mov     dl, [eax]
+.text:0100215D                 inc     eax
+.text:0100215E                 test    dl, dl
+.text:01002160                 jnz     short loc_100215B
+.text:01002162                 sub     eax, ecx
+.text:01002164                 push    eax             ; cchDstLength
+.text:01002165                 push    dword ptr [ebp+lpszSrc] ; lpszDst
+.text:01002168                 push    dword ptr [ebp+lpszSrc] ; lpszSrc
+.text:0100216B                 call    ds:__imp__CharToOemBuffA@12 ; CharToOemBuffA(x,x,x)
+.text:01002171                 push    dword ptr [ebp+lpszSrc]
+.text:01002174                 push    offset aS       ; "%s"
+.text:01002179                 push    esi             ; File
+.text:0100217A                 call    ds:__imp__fprintf
+.text:01002180                 add     esp, 0Ch
+.text:01002183                 push    dword ptr [ebp+lpszSrc] ; hMem
+.text:01002186                 call    ds:__imp__LocalFree@4 ; LocalFree(x)
+.text:0100218C                 mov     eax, edi
+.text:0100218E                 pop     esi
+
+所以只要 IAT HOOK fprintf就可以。
+
+int __cdecl myfprintf( 
+			FILE *stream,
+			const char *format ,...
+			)
+{
+	va_list args;
+	int n;
+	char *sprint_buf = (char*)malloc(0x1000);
+	va_start(args, format);
+	n = vsprintf(sprint_buf, format, args);
+	va_end(args);
+
+
+//  sprint_buf 就是内容了，可以自己处理。
+	free(sprint_buf);
+
+	return 0;
+}

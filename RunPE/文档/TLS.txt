@@ -1,0 +1,32 @@
+0100887a 648b0d2c000000  mov     ecx,dword ptr fs:[2Ch]
+01008881 56              push    esi
+01008882 8d3481          lea     esi,[ecx+eax*4]
+01008885 57              push    edi
+01008886 8b3e            mov     edi,dword ptr [esi]  ds:0023:00000000=????????
+01008888 83bf0400000000  cmp     dword ptr [edi+4],0
+
+
+因为是  mov     ecx,dword ptr fs:[2Ch] 访问TEB 的 ThreadLocalStoragePointer， 如果我们没模拟LOADER初始话得话就会失败。。。所以需要自己分析TLS目录获取数据，填到内存，然后修改 ThreadLocalStoragePointer指针
+
+其实只需要分配合适空间大小就可以。。里面的内容程序自己会添加，如果你得程序没使用TLS，那你得线程的ThreadLocalStoragePointer就为NULL，显然如果要跑的程序使用TLS，那访问该地方就蹦而了
+
+
+void LdrInitThreadTls(PIMAGE_TLS_DIRECTORY pTlsDir)
+{
+	PVOID *ThreadLocalStoragePointer = NULL;
+	UCHAR *pData = NULL;
+	ULONG TlsSize = 0;
+	ULONG TlsInitDataSize = 0;
+
+	TlsInitDataSize = pTlsDir->EndAddressOfRawData - pTlsDir->StartAddressOfRawData;	
+	TlsSize = (pTlsDir->EndAddressOfRawData - pTlsDir->StartAddressOfRawData) + pTlsDir->SizeOfZeroFill;
+	ThreadLocalStoragePointer = (PVOID*)malloc(TlsSize+ sizeof(PVOID));
+
+	pData = (UCHAR*)ThreadLocalStoragePointer + sizeof(PVOID);
+	pData = (UCHAR*)ThreadLocalStoragePointer ;
+	memcpy( pData, (void *)pTlsDir->StartAddressOfRawData, TlsInitDataSize );
+	memset( pData + TlsInitDataSize, 0, pTlsDir->SizeOfZeroFill );
+	NtCurrentTeb()->ThreadLocalStoragePointer = ThreadLocalStoragePointer;
+	*(PVOID*)ThreadLocalStoragePointer = ThreadLocalStoragePointer;
+
+}

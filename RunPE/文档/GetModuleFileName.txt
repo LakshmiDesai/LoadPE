@@ -1,0 +1,96 @@
+崩溃
+
+7282f0ef ff766c          push    dword ptr [esi+6Ch]
+7282f0f2 ff1568838372    call    dword ptr [MFC42u!_imp__GetModuleFileNameW (72838368)]
+7282f0f8 8d8584010000    lea     eax,[ebp+184h]
+7282f0fe 6a2e            push    2Eh
+7282f100 50              push    eax
+7282f101 ff1558878372    call    dword ptr [MFC42u!_imp__wcsrchr (72838758)]
+7282f107 66832000        and     word ptr [eax],0         ds:0023:00000000=????
+
+eax = 0，可见GetModuleFileNameW返回的是NULL，而微软又没有对这个函数的返回值进行判断。所以导致崩溃。
+
+为什么GetModuleFileNameW会崩溃呢？
+
+GetModuleFileName的定义
+DWORD WINAPI GetModuleFileName(
+  __in          HMODULE hModule,
+  __out         LPTSTR lpFilename,
+  __in          DWORD nSize
+);
+
+
+跟进去看堆栈
+
+0:000> kvnf
+ #   Memory  ChildEBP RetAddr  Args to Child              
+00           0012f650 7282f0f8 01000000 0012f874 00000104 kernel32!GetModuleFileNameW (FPO: [Non-Fpo])
+
+传入的   hModule 的值是 01000000，注意这个值不是我们主程序的基地址，而是被RUN的EXE得基地址。
+接着看
+GetModuleFileName内部实现：
+
+.text:7C80B458 loc_7C80B458:                           ; CODE XREF: GetModuleFileNameW(x,x,x)+85j
+.text:7C80B458                 mov     [ebp+var_38], esi
+.text:7C80B45B                 mov     ecx, [ebp+var_24]
+.text:7C80B45E                 cmp     ecx, [esi+18h]
+.text:7C80B461                 jz      short loc_7C80B481
+.text:7C80B463                 mov     esi, [esi]
+.text:7C80B465
+.text:7C80B465 loc_7C80B465:                           ; CODE XREF: GetModuleFileNameW(x,x,x)+54j
+.text:7C80B465                 mov     [ebp+var_2C], esi
+.text:7C80B468                 cmp     esi, eax
+.text:7C80B46A                 jnz     short loc_7C80B458
+
+..........
+
+.text:7C80B413 loc_7C80B413:                           ; CODE XREF: GetModuleFileNameW(x,x,x)+1C9j
+.text:7C80B413                                         ; GetModuleFileNameW(x,x,x)+35979j
+.text:7C80B413                 lea     eax, [ebp+var_1C]
+.text:7C80B416                 push    eax
+.text:7C80B417                 push    edi
+.text:7C80B418                 push    1
+.text:7C80B41A                 call    _LdrLockLoaderLock@12 ; LdrLockLoaderLock(x,x,x)
+.text:7C80B41F                 mov     [ebp+ms_exc.disabled], edi
+.text:7C80B422                 mov     eax, large fs:18h ；@@@@@@@@@@ TEB
+.text:7C80B428                 mov     [ebp+var_30], eax
+.text:7C80B42B                 mov     eax, [eax+30h] ；@@@@@@@@PEB
+.text:7C80B42E                 mov     eax, [eax+0Ch] ； @@@@@@@@ _PEB_LDR_DATA
+.text:7C80B431                 add     eax, 0Ch ；@@@@@@@@ nLoadOrderModuleList : _LIST_ENTRY
+.text:7C80B434                 mov     [ebp+var_34], eax
+.text:7C80B437                 mov     esi, [eax]
+.text:7C80B439                 jmp     short loc_7C80B465
+
+nLoadOrderModuleList 链表中成员的结构是：
+typedef struct _LDR_MODULE
+{
+    LIST_ENTRY          InLoadOrderModuleList;   +0x00
+    LIST_ENTRY          InMemoryOrderModuleList; +0x08  
+    LIST_ENTRY          InInitializationOrderModuleList; +0x10
+    void*               BaseAddress;  +0x18
+    void*               EntryPoint;   +0x1c
+    ULONG               SizeOfImage;
+    UNICODE_STRING      FullDllName;
+    UNICODE_STRING      BaseDllName;
+    ULONG               Flags;
+    SHORT               LoadCount;
+    SHORT               TlsIndex;
+    HANDLE              SectionHandle;
+    ULONG               CheckSum;
+    ULONG               TimeDateStamp;
+} LDR_MODULE, *PLDR_MODULE;
+
+可见 GetModuleFileName是通过遍历LoadOrderModuleList，然后看hModule 跟LDR_MODULE：：BaseAddress 相等，相等的话就取出里面的FullDllName。但由于我们传入的hModule是被处理过的，所以自然在链表里找不到导致返回NULL，而返回之后MS又不做判断就直接引用返回值，导致崩溃。
+
+
+
+
+
+
+
+
+
+
+
+
+

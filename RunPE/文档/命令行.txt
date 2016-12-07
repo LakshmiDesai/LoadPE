@@ -1,0 +1,82 @@
+MIAN的参数怎样压的？
+
+
+int __cdecl _tmainCRTStartup()
+.text:60022B50 ; int __cdecl _tmainCRTStartup()
+
+//
+//调用GetCommandLineA之后调用setargv设置命令行，其实就是设置内部变量___argv和___argc，之后PUSH这俩个变量，在CALL MAIN
+//
+.text:60022BE8 loc_60022BE8:                           ; CODE XREF: __tmainCRTStartup+8Cj
+.text:60022BE8                 call    ds:__imp__GetCommandLineA@0 ; GetCommandLineA()
+.text:60022BEE                 mov     __acmdln, eax
+.text:60022BF3                 call    j____crtGetEnvironmentStringsA
+.text:60022BF8                 mov     __aenvptr, eax
+.text:60022BFD                 call    j___setargv
+
+
+....
+.text:60022C42 loc_60022C42:                           ; CODE XREF: __tmainCRTStartup+E4j
+.text:60022C42                 mov     ecx, __environ
+.text:60022C48                 mov     ___initenv, ecx
+.text:60022C4E                 mov     edx, __environ
+.text:60022C54                 push    edx
+.text:60022C55                 mov     eax, ___argv ;@@@@@@@@@内部变量
+.text:60022C5A                 push    eax
+.text:60022C5B                 mov     ecx, ___argc  ;@@@@@@@@@内部变量
+.text:60022C61                 push    ecx
+.text:60022C62                 call    j__main
+
+
+
+int __cdecl _setargv()
+.text:60031F40 ; int __cdecl _setargv()
+.text:60031F40 __setargv       proc near               ; CODE XREF: j___setargvj
+
+.text:60031F6E                 push    0               ; hModule
+.text:60031F70                 call    ds:__imp__GetModuleFileNameA@12 ; GetModuleFileNameA(x,x,x)
+.text:60031F76                 push    offset _pgmname ; _Value
+
+.text:6003201B loc_6003201B:                           ; CODE XREF: __setargv+D4j
+.text:6003201B                 lea     ecx, [ebp+numchars]
+.text:6003201E                 push    ecx             ; numchars
+.text:6003201F                 lea     edx, [ebp+numargs]
+.text:60032022                 push    edx             ; numargs
+.text:60032023                 mov     eax, [ebp+numargs]
+.text:60032026                 mov     ecx, [ebp+p]
+.text:60032029                 lea     edx, [ecx+eax*4]
+.text:6003202C                 push    edx             ; args
+.text:6003202D                 mov     eax, [ebp+p]
+.text:60032030                 push    eax             ; argv
+.text:60032031                 mov     ecx, [ebp+cmdstart]
+.text:60032034                 push    ecx             ; cmdstart
+.text:60032035                 call    parse_cmdline
+.text:6003203A                 add     esp, 14h
+.text:6003203D                 mov     edx, [ebp+numargs]
+.text:60032040                 sub     edx, 1
+.text:60032043                 mov     ___argc, edx  ;@@@@@@@@@内部变量
+.text:60032049                 mov     eax, [ebp+p]
+.text:6003204C                 mov     ___argv, eax ;@@@@@@@@@内部变量
+.text:60032051                 xor     eax, eax
+
+
+kernel32!GetCommandLineA:
+7c812fbd a1f455887c      mov     eax,dword ptr [kernel32!BaseAnsiCommandLine+0x4 (7c8855f4)] ds:0023:7c8855f4=00151ee0
+
+kernel32!GetCommandLineW:
+7c817023 a10450887c      mov     eax,dword ptr [kernel32!BaseUnicodeCommandLine+0x4 (7c885004)]
+7c817028 c3              ret
+
+可见他们没走PEB。
+
+
+HOOK  GetCommandLine或者修改BaseAnsiCommandLine，BaseUnicodeCommandLine就可以捕获或者修改命令行传入的命令行
+
+
+
+
+
+
+
+
+

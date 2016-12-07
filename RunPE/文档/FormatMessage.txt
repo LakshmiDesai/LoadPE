@@ -1,0 +1,36 @@
+XP很多程序的字符串都放在资源中，这样只要访问资源就可以了。但WIN 7中，很多字符串都是存在.MUI文件中而不是资源中。
+因为微软的控制台程序几乎都会调用FormatMessage，所以这个函数如果失败，后面的功能就得不到执行。在WIN 7中需要对这个API进行处理，因为它没有去访问资源而是.MUI文件。MUI文件一般放在SYSTEM32\ZH-CN\目录下
+，文件对应的.MUI文件可以通过GetFileMUIPath来获取
+
+注:如果操作系统是 英文的或者其他语言的，那就不是ZH-CN了，具体可以通过API 
+BOOL SetThreadPreferredUILanguages(
+  DWORD  dwFlags,
+  PCWSTR  pwszLanguagesBuffer,
+  PULONG  pulNumLanguages
+);
+
+来获取。
+
+
+.MUI加载的时机
+.MUI加载的时机是比较早的，也就是在进入MAIN之前被LDR给加载了。arp为例子，当运行arp.exe时，LdrpRunInitializeRoutines就会加载arp.exe.mui这个文件，然后才会进入到MAIN函数里面。
+
+问题来了，因为我们自己加载要运行的模块，并没有走LdrpRunInitializeRoutines，自然我们进程空间就没有相应的.mui文件。解决办法就是需要自己LoadLibraryEx(RUN_IMAGE_FILE_PATH, NULL, NULL);一下。。最主要就是获取 .MUI文件的全路径。
+
+
+FormatMessage
+DWORD WINAPI FormatMessage(
+  __in          DWORD dwFlags,
+  __in          LPCVOID lpSource,
+  __in          DWORD dwMessageId,
+  __in          DWORD dwLanguageId,
+  __out         LPTSTR lpBuffer,
+  __in          DWORD nSize,
+  __in          va_list* Arguments
+);
+
+对访问.MUI获取字符串来说，dwFlags必须是要有FORMAT_MESSAGE_FROM_HMODULE
+，所以这个标志是我们判断的重要依据。
+
+MS自己的lpSource传入为NULL，这样它会自动访问.MUI文件。而如果.MUI是我们自己加载的，那传入NULL无疑会导致失败，没能找到资源。所以需要HOOK这个API把lpSource改成我们LOAD .MUI文件的内存地址。
+

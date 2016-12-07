@@ -1,0 +1,330 @@
+Loader 要做的事情
+
+1） 读取磁盘文件到内存
+2） 处理导入表，重定位表，资源表
+3） CALL入口函数
+
+
+因为是加载EXE模块，XP的话默认加载基地址就是PE头种的ImageBase，这个地址空间一般状态是MEM_FREE，
+
+
+XP
+0:000> !address 0x01000000
+    003a3000 : 003a3000 - 5fc4d000
+                    Type     00000000 
+                    Protect  00000001 PAGE_NOACCESS
+                    State    00010000 MEM_FREE
+                    Usage    RegionUsageFree
+
+所以申请这地址开始的内存成功概率很大，这种情况下Loader会变得比较简单，只需要处理导入表就可以，而WIN 7因为采用了 地址随机分布 机制，EXE加载的地址不一定是ImageBase，ImageBase开始的内存已经被占用了
+WIN 7
+Usage:                  MemoryMappedFile
+Allocation Base:        00870000
+Base Address:           0096d000
+End Address:            01470000 ；@@@@@@@@@@
+Region Size:            00b03000
+Type:                   00040000	MEM_MAPPED
+State:                  00002000	MEM_RESERVE
+Protect:                00000000	
+Mapped file name:       PageFile
+
+强制使用的后果是造成莫名的崩溃。
+
+在XP为了让程序尽可能的在其默认加载的基地址运行，
+需要减低ImageBase跟我们的EXE地址冲，解决办法就是我们编译的模块选一个加载的基地址。这里我选的是 0x5FFF0000，这个地址就可以避免跟要RUN的EXE模块的基地址冲突了，另外为了能在WIN 7跑，还需要Disable Image Randomization (/DYNAMICBASE:NO)。为了避免DEP而导致出错，所以分配的内存的属性一律改为PAGE_EXECUTE_READWRITE
+
+
+处理静态TLS
+看这么一个例子
+0100887a 648b0d2c000000  mov     ecx,dword ptr fs:[2Ch]
+01008881 56              push    esi
+01008882 8d3481          lea     esi,[ecx+eax*4]
+01008885 57              push    edi
+01008886 8b3e            mov     edi,dword ptr [esi]  ds:0023:00000000=????????
+01008888 83bf0400000000  cmp     dword ptr [edi+4],0
+
+
+因为是 mov     ecx,dword ptr fs:[2Ch] 访问TEB 的 ThreadLocalStoragePointer，如果我们没模拟LOADER初始话得话，ThreadLocalStoragePointer就为NULL，所以需要自己分析TLS目录获取数据，填到内存，然后修改 ThreadLocalStoragePointer指针
+
+void LdrInitThreadTls(PIMAGE_TLS_DIRECTORY pTlsDir)
+{
+	PVOID *ThreadLocalStoragePointer = NULL;
+	UCHAR *pData = NULL;
+	ULONG TlsSize = 0;
+	ULONG TlsInitDataSize = 0;
+
+	TlsInitDataSize = pTlsDir->EndAddressOfRawData - pTlsDir->StartAddressOfRawData;	
+	TlsSize = (pTlsDir->EndAddressOfRawData - pTlsDir->StartAddressOfRawData) + pTlsDir->SizeOfZeroFill;
+	ThreadLocalStoragePointer = (PVOID*)malloc(TlsSize+ sizeof(PVOID));
+
+	pData = (UCHAR*)ThreadLocalStoragePointer + sizeof(PVOID);
+	pData = (UCHAR*)ThreadLocalStoragePointer ;
+	memcpy( pData, (void *)pTlsDir->StartAddressOfRawData, TlsInitDataSize );
+	memset( pData + TlsInitDataSize, 0, pTlsDir->SizeOfZeroFill );
+	NtCurrentTeb()->ThreadLocalStoragePointer = ThreadLocalStoragePointer;
+	*(PVOID*)ThreadLocalStoragePointer = ThreadLocalStoragePointer;
+
+}
+
+
+
+
+
+FormatMessage处理
+
+    XP很多程序的字符串都放在资源中，这样只要访问资源就可以了。但WIN 7中，很多字符串都是存在.MUI文件中而不是资源中。
+因为微软的控制台程序几乎都会调用FormatMessage，所以这个函数如果失败，后面的功能就得不到执行。在WIN 7中需要对这个API进行处理，因为它没有去访问资源而是.MUI文件。MUI文件一般放在SYSTEM32\ZH-CN\目录下
+，文件对应的.MUI文件可以通过GetFileMUIPath来获取
+
+.MUI加载的时机
+.MUI加载的时机是比较早的，也就是在进入MAIN之前被LDR给加载了。arp为例子，当运行arp.exe时，LdrpRunInitializeRoutines就会加载arp.exe.mui这个文件，然后才会进入到MAIN函数里面。
+
+问题来了，因为我们自己加载要运行的模块，并没有走LdrpRunInitializeRoutines，自然我们进程空间就没有相应的.mui文件。解决办法就是需要自己LoadLibraryEx(RUN_IMAGE_FILE_PATH, NULL, NULL);一下。。最主要就是获取 .MUI文件的全路径。
+
+FormatMessage
+DWORD WINAPI FormatMessage(
+  __in          DWORD dwFlags,
+  __in          LPCVOID lpSource,
+  __in          DWORD dwMessageId,
+  __in          DWORD dwLanguageId,
+  __out         LPTSTR lpBuffer,
+  __in          DWORD nSize,
+  __in          va_list* Arguments
+);
+
+对访问.MUI获取字符串来说，dwFlags必须是要有FORMAT_MESSAGE_FROM_HMODULE，所以这个标志是我们判断的重要依据。MS自己的lpSource传入为NULL，这样它会自动访问.MUI文件。而如果.MUI是我们自己加载的，那传入NULL无疑会导致失败，没能找到资源。所以需要HOOK这个API把lpSource改成我们LOAD .MUI文件的内存地址。
+
+
+
+
+
+
+GetModuleFileName处理
+7282f0ef ff766c          push    dword ptr [esi+6Ch]
+7282f0f2 ff1568838372    call    dword ptr [MFC42u!_imp__GetModuleFileNameW (72838368)]
+7282f0f8 8d8584010000    lea     eax,[ebp+184h]
+7282f0fe 6a2e            push    2Eh
+7282f100 50              push    eax
+7282f101 ff1558878372    call    dword ptr [MFC42u!_imp__wcsrchr (72838758)]
+7282f107 66832000        and     word ptr [eax],0         ds:0023:00000000=????
+
+eax = 0，可见GetModuleFileNameW返回的是NULL，而微软又没有对这个函数的返回值进行判断。所以导致崩溃。
+
+为什么GetModuleFileNameW会崩溃呢？
+
+GetModuleFileName的定义
+DWORD WINAPI GetModuleFileName(
+  __in          HMODULE hModule,
+  __out         LPTSTR lpFilename,
+  __in          DWORD nSize
+);
+
+
+跟进去看堆栈
+
+0:000> kvnf
+ #   Memory  ChildEBP RetAddr  Args to Child              
+00           0012f650 7282f0f8 01000000 0012f874 00000104 kernel32!GetModuleFileNameW (FPO: [Non-Fpo])
+
+传入的   hModule 的值是 01000000，注意这个值不是我们主程序的基地址，而是被RUN的EXE得基地址。
+接着看
+GetModuleFileName内部实现：
+
+.text:7C80B458 loc_7C80B458:                           ; CODE XREF: GetModuleFileNameW(x,x,x)+85j
+.text:7C80B458                 mov     [ebp+var_38], esi
+.text:7C80B45B                 mov     ecx, [ebp+var_24]
+.text:7C80B45E                 cmp     ecx, [esi+18h]
+.text:7C80B461                 jz      short loc_7C80B481
+.text:7C80B463                 mov     esi, [esi]
+.text:7C80B465
+.text:7C80B465 loc_7C80B465:                           ; CODE XREF: GetModuleFileNameW(x,x,x)+54j
+.text:7C80B465                 mov     [ebp+var_2C], esi
+.text:7C80B468                 cmp     esi, eax
+.text:7C80B46A                 jnz     short loc_7C80B458
+
+..........
+
+.text:7C80B413 loc_7C80B413:                           ; CODE XREF: GetModuleFileNameW(x,x,x)+1C9j
+.text:7C80B413                                         ; GetModuleFileNameW(x,x,x)+35979j
+.text:7C80B413                 lea     eax, [ebp+var_1C]
+.text:7C80B416                 push    eax
+.text:7C80B417                 push    edi
+.text:7C80B418                 push    1
+.text:7C80B41A                 call    _LdrLockLoaderLock@12 ; LdrLockLoaderLock(x,x,x)
+.text:7C80B41F                 mov     [ebp+ms_exc.disabled], edi
+.text:7C80B422                 mov     eax, large fs:18h ；@@@@@@@@@@ TEB
+.text:7C80B428                 mov     [ebp+var_30], eax
+.text:7C80B42B                 mov     eax, [eax+30h] ；@@@@@@@@PEB
+.text:7C80B42E                 mov     eax, [eax+0Ch] ； @@@@@@@@ _PEB_LDR_DATA
+.text:7C80B431                 add     eax, 0Ch ；@@@@@@@@ nLoadOrderModuleList : _LIST_ENTRY
+.text:7C80B434                 mov     [ebp+var_34], eax
+.text:7C80B437                 mov     esi, [eax]
+.text:7C80B439                 jmp     short loc_7C80B465
+
+nLoadOrderModuleList 链表中成员的结构是：
+typedef struct _LDR_MODULE
+{
+    LIST_ENTRY          InLoadOrderModuleList;   +0x00
+    LIST_ENTRY          InMemoryOrderModuleList; +0x08  
+    LIST_ENTRY          InInitializationOrderModuleList; +0x10
+    void*               BaseAddress;  +0x18
+    void*               EntryPoint;   +0x1c
+    ULONG               SizeOfImage;
+    UNICODE_STRING      FullDllName;
+    UNICODE_STRING      BaseDllName;
+    ULONG               Flags;
+    SHORT               LoadCount;
+    SHORT               TlsIndex;
+    HANDLE              SectionHandle;
+    ULONG               CheckSum;
+    ULONG               TimeDateStamp;
+} LDR_MODULE, *PLDR_MODULE;
+
+可见 GetModuleFileName是通过遍历LoadOrderModuleList，然后看hModule 跟LDR_MODULE：：BaseAddress 相等，相等的话就取出里面的FullDllName。但由于我们传入的hModule是被处理过的，所以自然在链表里找不到导致返回NULL，而返回之后MS又不做判断就直接引用返回值，导致崩溃。
+
+
+参数处理
+int __cdecl _tmainCRTStartup()
+.text:60022B50 ; int __cdecl _tmainCRTStartup()
+
+//
+//调用GetCommandLineA之后调用setargv设置命令行，其实就是设置内部变量___argv和___argc，之后PUSH这俩个变量，在CALL MAIN
+//
+.text:60022BE8 loc_60022BE8:                           ; CODE XREF: __tmainCRTStartup+8Cj
+.text:60022BE8                 call    ds:__imp__GetCommandLineA@0 ; GetCommandLineA()
+.text:60022BEE                 mov     __acmdln, eax
+.text:60022BF3                 call    j____crtGetEnvironmentStringsA
+.text:60022BF8                 mov     __aenvptr, eax
+.text:60022BFD                 call    j___setargv
+
+
+....
+.text:60022C42 loc_60022C42:                           ; CODE XREF: __tmainCRTStartup+E4j
+.text:60022C42                 mov     ecx, __environ
+.text:60022C48                 mov     ___initenv, ecx
+.text:60022C4E                 mov     edx, __environ
+.text:60022C54                 push    edx
+.text:60022C55                 mov     eax, ___argv ;@@@@@@@@@内部变量
+.text:60022C5A                 push    eax
+.text:60022C5B                 mov     ecx, ___argc  ;@@@@@@@@@内部变量
+.text:60022C61                 push    ecx
+.text:60022C62                 call    j__main
+
+
+
+int __cdecl _setargv()
+.text:60031F40 ; int __cdecl _setargv()
+.text:60031F40 __setargv       proc near               ; CODE XREF: j___setargvj
+
+.text:60031F6E                 push    0               ; hModule
+.text:60031F70                 call    ds:__imp__GetModuleFileNameA@12 ; GetModuleFileNameA(x,x,x)
+.text:60031F76                 push    offset _pgmname ; _Value
+
+.text:6003201B loc_6003201B:                           ; CODE XREF: __setargv+D4j
+.text:6003201B                 lea     ecx, [ebp+numchars]
+.text:6003201E                 push    ecx             ; numchars
+.text:6003201F                 lea     edx, [ebp+numargs]
+.text:60032022                 push    edx             ; numargs
+.text:60032023                 mov     eax, [ebp+numargs]
+.text:60032026                 mov     ecx, [ebp+p]
+.text:60032029                 lea     edx, [ecx+eax*4]
+.text:6003202C                 push    edx             ; args
+.text:6003202D                 mov     eax, [ebp+p]
+.text:60032030                 push    eax             ; argv
+.text:60032031                 mov     ecx, [ebp+cmdstart]
+.text:60032034                 push    ecx             ; cmdstart
+.text:60032035                 call    parse_cmdline
+.text:6003203A                 add     esp, 14h
+.text:6003203D                 mov     edx, [ebp+numargs]
+.text:60032040                 sub     edx, 1
+.text:60032043                 mov     ___argc, edx  ;@@@@@@@@@内部变量
+.text:60032049                 mov     eax, [ebp+p]
+.text:6003204C                 mov     ___argv, eax ;@@@@@@@@@内部变量
+.text:60032051                 xor     eax, eax
+
+
+kernel32!GetCommandLineA:
+7c812fbd a1f455887c      mov     eax,dword ptr [kernel32!BaseAnsiCommandLine+0x4 (7c8855f4)] ds:0023:7c8855f4=00151ee0
+
+kernel32!GetCommandLineW:
+7c817023 a10450887c      mov     eax,dword ptr [kernel32!BaseUnicodeCommandLine+0x4 (7c885004)]
+7c817028 c3              ret
+
+可见他们没走PEB。
+
+
+HOOK  GetCommandLine或者修改BaseAnsiCommandLine，BaseUnicodeCommandLine就可以捕获或者修改命令行传入的命令行
+
+另外个别程序比较特殊
+msvcrt.dll 第一次被加载的时候，会调用GetCommandLine来获取当前参数，然后进行处理填充msvcrt的内部变量	
+msvcrt!__argc 和 msvcrt!__argv。之后通过__getmainargs, __wgetmainargs就可以获取到相应参数，这时候并不会再走GetCommandLine。WIN 7的ARP.EXE获取命令行参数就是通过__getmainargs。因为msvcrt.dll在进程运行的时候已经被加载，所以无法拦截到GetCommandLine
+
+
+
+
+进程退出处理
+当在内存中运行的程序，比如arp.EXE执行完之后就会退出，那结果是ExitProcess被调用，那将是我们主进程也结束，显然我们不希望这样。
+处理办法：HOOK ExitProcess。问题来了
+
+
+对MS的许多控制台程序，它们退出都是调用exit
+ #   Memory  ChildEBP RetAddr  Args to Child              
+00           003ef554 7c92df5a 7c939b23 000007f4 00000000 ntdll!KiFastSystemCallRet (FPO: [0,0,0])
+01         4 003ef558 7c939b23 000007f4 00000000 00000000 ntdll!NtWaitForSingleObject+0xc (FPO: [3,0,0])
+02        88 003ef5e0 7c921046 00c31ae8 77c0a5eb 77c31ae8 ntdll!RtlpWaitForCriticalSection+0x132 (FPO: [Non-Fpo])
+03         8 003ef5e8 77c0a5eb 77c31ae8 7c8099cf 003ef608 ntdll!RtlEnterCriticalSection+0x46 (FPO: [1,0,0])
+04        10 003ef5f8 77c09de8 00000008 7c8099cf 003ef61c msvcrt!_lock+0x30 (FPO: [Non-Fpo])
+05        10 003ef608 77c09e90 00000000 00000000 00000000 msvcrt!_cinit+0x5e (FPO: [Non-Fpo])
+06        14 003ef61c 01002735 00000000 00000000 003efbc4 msvcrt!exit+0x12 (FPO: [Non-Fpo])
+
+
+里面持有了一个锁，所以如果HOOK ExitProcess， 那我们俩次在内存中运行arp.EXE之后就会死锁。所以对这类程序而言，不能HOOK ExitProcess，只能HOOK msvcrt!exit
+
+
+另外还需要一个技巧，在内存运行的程序由我们EXE的一个线程来完成，否则HOOK msvcrt!exit也没办法处理好逻辑
+
+void Fakeexit( 
+		  int status 
+		  )
+{
+
+	if( status == 0xbeebee )
+		Oldexit(status);
+
+	ExitThread(0xbeebee);
+}
+
+
+
+因为是创建的线程，所以只需要替换成ExitThread(0xbeebee);之后，进程退出这动作就被捕获了，然后我们替exit代为ExitThread(0xbeebee)后线程就退出返回控制到我们主EXE模块而不会出错。另外创建线程时要自己注意堆栈问题，否则堆栈可能会占用我们要放EXE的地址空间，导致失败，所以必须先分配内存空间后才能创建线程。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

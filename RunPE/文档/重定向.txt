@@ -1,0 +1,31 @@
+因为是加载EXE模块，XP的话默认加载基地址就是PE头种的ImageBase，而WIN 7因为采用了 地址随机分布 机制，EXE加载的地址不一定是
+ImageBase。
+
+所以需要重定向，但这里有个问题，就是加了/GS编译选项后编译出来的EXE会有问题。
+在进入MAIN函数之前会执行这么一段代码
+
+60022e60 8bff            mov     edi,edi
+60022e62 55              push    ebp
+60022e63 8bec            mov     ebp,esp
+60022e65 e84ba6ffff      call    _________!ILT+1200(___security_init_cookie) (6001d4b5)
+60022e6a e811000000      call    _________!__tmainCRTStartup (60022e80)
+
+_________!__security_init_cookie:
+600312f0 8bff            mov     edi,edi
+600312f2 55              push    ebp
+600312f3 8bec            mov     ebp,esp
+600312f5 83ec18          sub     esp,18h
+600312f8 c745f800000000  mov     dword ptr [ebp-8],0
+600312ff c745fc00000000  mov     dword ptr [ebp-4],0
+60031306 813d38d108604ee640bb cmp dword ptr [_________!__security_cookie (6008d138)],0BB40E64Eh
+
+...........
+
+
+里面会引用许多security cookie的全局变量，而这些变量没有在重定向表里，所以如果加载的 地址不是PE头种的ImageBase，就会出现访问错误，导致崩溃。
+
+解决办法：
+
+
+不要加载到 PE头的ImageBase 以外的地址。那如果跟我们的EXE地址冲突怎么办？ 解决办法就是我们编译的模块选一个加载的基地址。这里我选的是 0x5FFF0000，这个地址就可以避免跟要RUN的EXE模块的基地址冲突了，另外为了能在WIN 7跑，还需要Disable Image Randomization (/DYNAMICBASE:NO)。 为了避免DEP而导致出错，所以分配的内存的属性一律改为
+PAGE_EXECUTE_READWRITE
